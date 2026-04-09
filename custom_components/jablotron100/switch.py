@@ -34,6 +34,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: JablotronConfigEn
 class JablotronProgrammableOutputEntity(JablotronEntity, SwitchEntity):
 
 	_control: JablotronProgrammableOutput
+	_changed_by: str | None = None
 
 	_attr_device_class = SwitchDeviceClass.SWITCH
 	_attr_translation_key = "pg_output"
@@ -53,6 +54,15 @@ class JablotronProgrammableOutputEntity(JablotronEntity, SwitchEntity):
 		super()._update_attributes()
 
 		self._attr_is_on = self._get_state() == STATE_ON
+		self._attr_extra_state_attributes = {
+			"changed_by": self._changed_by,
+		}
+
+	def update_state(self, state) -> None:
+		if self._get_state() != state:
+			self._changed_by = self._jablotron.last_authorized_user_or_device()
+
+		super().update_state(state)
 
 	def turn_on(self, **kwargs) -> None:
 		self._jablotron.toggle_pg_output(self._control.pg_output_number, STATE_ON)

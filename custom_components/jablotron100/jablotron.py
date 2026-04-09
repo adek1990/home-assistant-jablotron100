@@ -85,10 +85,12 @@ from .const import (
 	PACKET_DIAGNOSTICS_COMMAND,
 	PACKET_GET_DEVICES_SECTIONS,
 	PACKET_GET_SYSTEM_INFO,
+	PACKET_PG_OUTPUT_EVENT,
 	PACKET_PG_OUTPUTS_STATES,
 	PACKET_SECTIONS_STATES,
 	PACKET_SYSTEM_INFO,
 	PACKET_UI_CONTROL,
+	PG_OUTPUT_EVENT_USER_ACTIVATION,
 	PartiallyArmingMode,
 	PG_OUTPUT_TURN_OFF,
 	PG_OUTPUT_TURN_ON,
@@ -1022,6 +1024,9 @@ class Jablotron:
 
 							if in_service_mode != self.in_service_mode:
 								self._update_all_hass_entities()
+
+						elif self._is_pg_output_event_packet(packet):
+							self._parse_pg_output_event_packet(packet)
 
 						elif self._is_pg_outputs_states_packet(packet):
 							self._parse_pg_outputs_states_packet(packet)
@@ -2149,6 +2154,12 @@ class Jablotron:
 		self._last_authorized_user_or_device = "User {}".format(user_no)
 		LOGGER.debug("Authorized user: {}".format(user_no))
 
+	def _parse_pg_output_event_packet(self, packet: bytes) -> None:
+		offset = 104 if self._is_central_unit_101_or_similar() else 44
+		user_no = int((self.bytes_to_int(packet[3:4]) - offset) / 4)
+		self._last_authorized_user_or_device = "User {}".format(user_no)
+		LOGGER.debug("PG output activated by user: {}".format(user_no))
+
 	@core.callback
 	def _data_to_store(self) -> dict:
 		return self._stored_data
@@ -2196,6 +2207,10 @@ class Jablotron:
 	@staticmethod
 	def _is_pg_outputs_states_packet(packet: bytes) -> bool:
 		return packet[:1] == PACKET_PG_OUTPUTS_STATES
+
+	@staticmethod
+	def _is_pg_output_event_packet(packet: bytes) -> bool:
+		return packet[:1] == PACKET_PG_OUTPUT_EVENT and packet[2:3] == PG_OUTPUT_EVENT_USER_ACTIVATION
 
 	@staticmethod
 	def _is_pg_output_toggle_packet(packet: bytes) -> bool:
