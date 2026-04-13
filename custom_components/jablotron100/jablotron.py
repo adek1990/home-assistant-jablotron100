@@ -246,6 +246,7 @@ class Jablotron:
 		self.in_service_mode = False
 
 		self._last_authorized_user_or_device: str | None = None
+		self._last_keypad_auth: tuple[str, float] | None = None
 		self._successful_login: bool = True
 
 	def signal_entities_added(self) -> str:
@@ -263,8 +264,16 @@ class Jablotron:
 	def code_contains_asterisk(self) -> bool:
 		return self._config[CONF_PASSWORD].find("*") != -1
 
-	def last_authorized_user_or_device(self) -> int | None:
+	def last_authorized_user_or_device(self) -> str | None:
 		return self._last_authorized_user_or_device
+
+	def get_fresh_keypad_auth(self, max_age_seconds: float = 3.0) -> str | None:
+		if self._last_keypad_auth is None:
+			return None
+		user, timestamp = self._last_keypad_auth
+		if time.time() - timestamp > max_age_seconds:
+			return None
+		return user
 
 	async def initialize(self) -> None:
 		def shutdown_event(_):
@@ -1024,6 +1033,9 @@ class Jablotron:
 
 							if in_service_mode != self.in_service_mode:
 								self._update_all_hass_entities()
+
+						elif self._is_keypad_auth_packet(packet):
+							self._parse_keypad_auth_packet(packet)
 
 						elif self._is_pg_output_event_packet(packet):
 							self._parse_pg_output_event_packet(packet)
@@ -2155,10 +2167,27 @@ class Jablotron:
 		LOGGER.debug("Authorized user: {}".format(user_no))
 
 	def _parse_pg_output_event_packet(self, packet: bytes) -> None:
+		pg_output_number = self.bytes_to_int(packet[2:3]) - 0x32
+		if pg_output_number < 1:
+			return
+
 		offset = 104 if self._is_central_unit_101_or_similar() else 44
 		user_no = int((self.bytes_to_int(packet[3:4]) - offset) / 4)
-		self._last_authorized_user_or_device = "User {}".format(user_no)
-		LOGGER.debug("PG output activated by user: {}".format(user_no))
+		user = "User {}".format(user_no)
+		source = "F-Link" if packet[5:6] == b"\x3e" else "keypad"
+		LOGGER.debug("PG {} activated by user: {} (source: {})".format(pg_output_number, user_no, source))
+
+		pg_output_id = self._get_pg_output_id(pg_output_number)
+		entity = self.hass_entities.get(pg_output_id)
+		if entity is not None and hasattr(entity, "set_changed_by"):
+			self._hass.loop.call_soon_threadsafe(entity.set_changed_by, user)
+
+	def _parse_keypad_auth_packet(self, packet: bytes) -> None:
+		offset = 104 if self._is_central_unit_101_or_similar() else 44
+		user_no = int((self.bytes_to_int(packet[3:4]) - offset) / 4)
+		user = "User {}".format(user_no)
+		self._last_keypad_auth = (user, time.time())
+		LOGGER.debug("Keypad auth by user: {}".format(user_no))
 
 	@core.callback
 	def _data_to_store(self) -> dict:
@@ -2210,7 +2239,28 @@ class Jablotron:
 
 	@staticmethod
 	def _is_pg_output_event_packet(packet: bytes) -> bool:
-		return packet[:1] == PACKET_PG_OUTPUT_EVENT and packet[2:3] == PG_OUTPUT_EVENT_USER_ACTIVATION
+		if packet[:1] != PACKET_PG_OUTPUT_EVENT:
+			return False
+		if len(packet) < 8:
+			return False
+		# byte[4] == 0x04 marks "PG activation by user"
+		# byte[5]: 0x3e = F-Link/Server, 0x0f = physical keypad
+		# byte[2] encodes PG number (0x32 + pg), valid range for PG 1..32
+		return (
+			packet[4:5] == b"\x04"
+			and packet[5:6] in (b"\x3e", b"\x0f")
+			and 0x33 <= packet[2] <= 0x52
+		)
+
+	@staticmethod
+	def _is_keypad_auth_packet(packet: bytes) -> bool:
+		if packet[:1] != PACKET_PG_OUTPUT_EVENT:
+			return False
+		if len(packet) < 8:
+			return False
+		# byte[2] == 0x96 marks "keypad authorization" event
+		# byte[4:6] == 0x040f marks physical keypad source
+		return packet[2:3] == b"\x96" and packet[4:6] == b"\x04\x0f"
 
 	@staticmethod
 	def _is_pg_output_toggle_packet(packet: bytes) -> bool:
