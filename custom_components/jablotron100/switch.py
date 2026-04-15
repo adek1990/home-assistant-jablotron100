@@ -65,9 +65,14 @@ class JablotronProgrammableOutputEntity(JablotronEntity, SwitchEntity):
 	def update_state(self, state) -> None:
 		# When PG transitions OFF → ON, make sure changed_by reflects the user who triggered it.
 		# The d0 3c/3d event packet may arrive after the 0x50 state packet, so use the fresh
-		# keypad auth captured from d0 08 96 as a fallback.
+		# keypad auth as a fallback.
 		if state == STATE_ON and self._get_state() != STATE_ON:
-			fresh_auth = self._jablotron.get_fresh_keypad_auth()
+			# Level 1: Check per-PG context (recent auth for this specific output)
+			pg_number = self._control.pg_output_number
+			fresh_auth = self._jablotron.get_pg_activation_context(pg_number)
+			# Level 2: Fall back to global keypad auth
+			if fresh_auth is None:
+				fresh_auth = self._jablotron.get_fresh_keypad_auth()
 			if fresh_auth is not None:
 				self._changed_by = fresh_auth
 
