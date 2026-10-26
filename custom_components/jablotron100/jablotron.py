@@ -1879,9 +1879,14 @@ class Jablotron:
 		):
 			return True
 
+		# PG packets include PG events and user authorisations (keypad, app, USB) - without the flood of detector states
 		if (
 			self._options.get(CONF_LOG_PG_OUTPUTS_PACKETS, False)
-			and self._is_pg_outputs_states_packet(packet)
+			and (
+				self._is_pg_outputs_states_packet(packet)
+				or packet[:1] == PACKET_PG_OUTPUT_EVENT
+				or self._is_user_authorisation_device_state_packet(packet)
+			)
 		):
 			return True
 
@@ -1892,6 +1897,20 @@ class Jablotron:
 			return True
 
 		return False
+
+	def _is_user_authorisation_device_state_packet(self, packet: bytes) -> bool:
+		if not self._is_device_state_packet(packet):
+			return False
+
+		device_number = self._parse_device_number_from_device_state_packet(packet)
+
+		if device_number in (DeviceNumber.MOBILE_APPLICATION.value, DeviceNumber.USB.value):
+			return True
+
+		if not 1 <= device_number <= self._config[CONF_NUMBER_OF_DEVICES]:
+			return False
+
+		return self._get_device_type(device_number) in (DeviceType.KEYPAD, DeviceType.KEYPAD_WITH_DOOR_OPENING_DETECTOR)
 
 	def _should_be_outcoming_packet_logged(self, packet: bytes) -> bool:
 		if not self._options.get(CONF_ENABLE_DEBUGGING, DEFAULT_CONF_ENABLE_DEBUGGING):
