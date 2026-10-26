@@ -90,7 +90,6 @@ from .const import (
 	PACKET_SECTIONS_STATES,
 	PACKET_SYSTEM_INFO,
 	PACKET_UI_CONTROL,
-	PG_OUTPUT_EVENT_USER_ACTIVATION,
 	PartiallyArmingMode,
 	PG_OUTPUT_TURN_OFF,
 	PG_OUTPUT_TURN_ON,
@@ -246,7 +245,6 @@ class Jablotron:
 		self.in_service_mode = False
 
 		self._last_authorized_user_or_device: str | None = None
-		self._last_keypad_auth: tuple[str, float] | None = None
 		self._pg_activation_context: dict[int, tuple[str, float]] = {}
 		self._successful_login: bool = True
 
@@ -267,14 +265,6 @@ class Jablotron:
 
 	def last_authorized_user_or_device(self) -> str | None:
 		return self._last_authorized_user_or_device
-
-	def get_fresh_keypad_auth(self, max_age_seconds: float = 3.0) -> str | None:
-		if self._last_keypad_auth is None:
-			return None
-		user, timestamp = self._last_keypad_auth
-		if time.time() - timestamp > max_age_seconds:
-			return None
-		return user
 
 	def set_pg_activation_context(self, pg_number: int, user: str) -> None:
 		"""Store user context for a specific PG activation."""
@@ -1048,9 +1038,6 @@ class Jablotron:
 
 							if in_service_mode != self.in_service_mode:
 								self._update_all_hass_entities()
-
-						elif self._is_keypad_auth_packet(packet):
-							self._parse_keypad_auth_packet(packet)
 
 						elif self._is_pg_output_event_packet(packet):
 							self._parse_pg_output_event_packet(packet)
@@ -2199,13 +2186,11 @@ class Jablotron:
 		LOGGER.debug("Authorized user: {}".format(user_no))
 
 	def _parse_pg_output_event_packet(self, packet: bytes) -> None:
-		source = "F-Link" if packet[5] & 0x3f == 0x3e else "keypad"
-		pg_output_number = self.bytes_to_int(packet[2:3]) - 0x32
-
-		offset = 104 if self._is_central_unit_101_or_similar() else 44
-		user_no = int((self.bytes_to_int(packet[3:4]) - offset) / 4)
-		user = "User {}".format(user_no)
-		LOGGER.debug("PG {} activated by user: {} (source: {})".format(pg_output_number, user_no, source))
+		# Event packet = record of the central unit event log, verified against FLEXILOG.TXT of JA-107K:
+		# byte[2] = event code (0x33 + n = "PG n+1 on" within a group of 32), byte[6] & 0x0f = group (32 PG outputs each)
+		pg_output_number = self.bytes_to_int(packet[2:3]) - 0x32 + 32 * (packet[6] & 0x0f)
+		user = self._get_event_packet_source(packet)
+		LOGGER.debug("PG {} activated by: {}".format(pg_output_number, user))
 
 		# Store user context for this specific PG
 		self.set_pg_activation_context(pg_output_number, user)
@@ -2215,16 +2200,18 @@ class Jablotron:
 		if entity is not None and hasattr(entity, "set_changed_by"):
 			self._hass.loop.call_soon_threadsafe(entity.set_changed_by, user)
 
-	def _parse_keypad_auth_packet(self, packet: bytes) -> None:
-		offset = 104 if self._is_central_unit_101_or_similar() else 44
-		user_no = int((self.bytes_to_int(packet[3:4]) - offset) / 4)
-		user = "User {}".format(user_no)
-		self._last_keypad_auth = (user, time.time())
-		LOGGER.debug("Keypad auth by user: {}".format(user_no))
+	def _get_event_packet_source(self, packet: bytes) -> str:
+		# "Src" of the event log: bytes[3:5] & 0x0fff, without the lowest 2 bits.
+		# JA-107K: 26 = central unit, 26 + n = device n (keypad without tag), 267 + n = user n (keypad with tag, F-Link)
+		source = (self.bytes_to_int(packet[3:5]) & 0x0fff) >> 2
 
-		# Update all per-PG contexts with fresh auth so any pending PG activation gets this user
-		for pg_number in list(self._pg_activation_context.keys()):
-			self._pg_activation_context[pg_number] = (user, time.time())
+		if self._central_unit.model == "JA-107K":
+			if source >= 267:
+				return "User {}".format(source - 267)
+			if source > 26:
+				return "Device {}".format(source - 26)
+
+		return "Source {}".format(source)
 
 	@core.callback
 	def _data_to_store(self) -> dict:
@@ -2278,26 +2265,10 @@ class Jablotron:
 	def _is_pg_output_event_packet(packet: bytes) -> bool:
 		if packet[:1] != PACKET_PG_OUTPUT_EVENT:
 			return False
-		if len(packet) < 8:
+		if len(packet) < 10:
 			return False
-		# byte[4] == 0x04 marks "PG activation by user"
-		# byte[5] & 0x3f: 0x3e = F-Link/Server, 0x0f = physical keypad (high bits are flags, e.g. 0xfe)
-		# byte[2] encodes PG number (0x32 + pg), valid range for PG 1..32
-		return (
-			packet[4:5] == b"\x04"
-			and packet[5] & 0x3f in (0x3e, 0x0f)
-			and 0x33 <= packet[2] <= 0x52
-		)
-
-	@staticmethod
-	def _is_keypad_auth_packet(packet: bytes) -> bool:
-		if packet[:1] != PACKET_PG_OUTPUT_EVENT:
-			return False
-		if len(packet) < 8:
-			return False
-		# byte[2] == 0x96 marks "keypad authorization" event
-		# byte[4:6] == 0x040f marks physical keypad source
-		return packet[2:3] == b"\x96" and packet[4:6] == b"\x04\x0f"
+		# byte[2] = event code, 0x33..0x52 = PG output turned on (any source: keypad, F-Link, central unit)
+		return 0x33 <= packet[2] <= 0x52
 
 	@staticmethod
 	def _is_pg_output_toggle_packet(packet: bytes) -> bool:
