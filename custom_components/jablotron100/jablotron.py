@@ -1078,8 +1078,6 @@ class Jablotron:
 							self._last_authorized_user_or_device = None
 							self._login_error()
 
-					break
-
 			except Exception as ex:
 				LOGGER.exception("Read error: %s", ex)
 				self._set_unavailable()
@@ -2182,14 +2180,12 @@ class Jablotron:
 		LOGGER.debug("Authorized user: {}".format(user_no))
 
 	def _parse_pg_output_event_packet(self, packet: bytes) -> None:
+		source = "F-Link" if packet[5] & 0x3f == 0x3e else "keypad"
 		pg_output_number = self.bytes_to_int(packet[2:3]) - 0x32
-		if pg_output_number < 1:
-			return
 
 		offset = 104 if self._is_central_unit_101_or_similar() else 44
 		user_no = int((self.bytes_to_int(packet[3:4]) - offset) / 4)
 		user = "User {}".format(user_no)
-		source = "F-Link" if packet[5:6] == b"\x3e" else "keypad"
 		LOGGER.debug("PG {} activated by user: {} (source: {})".format(pg_output_number, user_no, source))
 
 		# Store user context for this specific PG
@@ -2266,11 +2262,11 @@ class Jablotron:
 		if len(packet) < 8:
 			return False
 		# byte[4] == 0x04 marks "PG activation by user"
-		# byte[5]: 0x3e = F-Link/Server, 0x0f = physical keypad
+		# byte[5] & 0x3f: 0x3e = F-Link/Server, 0x0f = physical keypad (high bits are flags, e.g. 0xfe)
 		# byte[2] encodes PG number (0x32 + pg), valid range for PG 1..32
 		return (
 			packet[4:5] == b"\x04"
-			and packet[5:6] in (b"\x3e", b"\x0f")
+			and packet[5] & 0x3f in (0x3e, 0x0f)
 			and 0x33 <= packet[2] <= 0x52
 		)
 
